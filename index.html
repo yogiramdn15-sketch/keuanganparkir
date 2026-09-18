@@ -2021,16 +2021,30 @@ document.getElementById('loginForm').addEventListener('submit', function(e){
 
 function loadApp(){
   document.getElementById('loginScreen').classList.add('hidden');
-  google.script.run.withSuccessHandler(md => {
-    masterData = md;
+  // OPTIMASI: dulu loadApp() -> getMasterData(), lalu loadDashboard() di
+  // dalam initDesktopApp() memicu 2 request lagi (getDashboardStats,
+  // lalu getLokasiMonitoring bersarang di callback-nya) = 3 round-trip
+  // berurutan ke server. Sekarang digabung jadi 1 request (getInitialData)
+  // yang menjalankan ketiganya di server, hasilnya langsung dipakai untuk
+  // render dashboard tanpa loadDashboard() perlu fetch ulang saat login.
+  google.script.run.withSuccessHandler(init => {
+    masterData = init.masterData;
+    _preloadedDashboard = init.dashboardStats;
+    _preloadedMonitoring = init.monitoring;
     const isDesktop = (currentUser.role === 'superadmin' || currentUser.role === 'admin');
     if (isDesktop) {
       initDesktopApp();
     } else {
       initMobileApp();
     }
-  }).getMasterData();
+  }).getInitialData(currentUser);
 }
+
+// Data dashboard/monitoring hasil getInitialData() saat login — dipakai
+// SEKALI oleh loadDashboard() di render pertama supaya tidak fetch ulang,
+// lalu dikosongkan lagi (refresh berikutnya tetap fetch fresh seperti biasa).
+let _preloadedDashboard = null;
+let _preloadedMonitoring = null;
 
 // ============================================================
 // DESKTOP APP
@@ -2416,7 +2430,7 @@ function loadDashboard(){
   const skeletonCard = (cls) => `<div class="stat-card ${cls}" style="opacity:.5;"><div class="sc-icon" style="background:var(--paper);"></div><div class="label">Memuat...</div><div class="value" style="color:var(--line);">—</div></div>`;
   statRow.innerHTML = skeletonCard('income') + skeletonCard('expense') + skeletonCard('saldo') + skeletonCard('neutral');
 
-  google.script.run.withSuccessHandler(stats => {
+  const renderStats = (stats) => {
     const s = stats.summary;
 
     // ── KPI Cards ──
@@ -2460,7 +2474,7 @@ function loadDashboard(){
     renderTrendChart(sortedMonths, byBulan);
 
     // ── Kepatuhan Lokasi (ditampilkan sebagai doughnut chart, senada dgn 2 chart kategori) ──
-    google.script.run.withSuccessHandler(mon => {
+    const renderMonitoringPanel = (mon) => {
       const total = mon.totalLokasi || 0;
       const sudah = mon.totalSudah || 0;
       const belum = Math.max(0, total - sudah);
@@ -2481,7 +2495,14 @@ function loadDashboard(){
             )
           : '<div class="empty-state">Belum ada data lokasi.</div>';
       }
-    }).getLokasiMonitoring(currentUser, new Date().toISOString().substring(0,10));
+    };
+    if (_preloadedMonitoring) {
+      renderMonitoringPanel(_preloadedMonitoring);
+      _preloadedMonitoring = null; // hanya dipakai sekali di render pertama
+    } else {
+      google.script.run.withSuccessHandler(renderMonitoringPanel)
+        .getLokasiMonitoring(currentUser, new Date().toISOString().substring(0,10));
+    }
 
     // ── Kinerja Perusahaan ──
     const bp = stats.byPerusahaan;
@@ -2570,8 +2591,14 @@ function loadDashboard(){
         <td style="text-align:right;font-weight:700;color:${net>=0?'var(--signal)':'var(--alert)'};">${net<0?'-':''}${fmtRupiah(Math.abs(net))}</td>
       </tr>`;
     }).join('') : '<tr><td colspan="6" class="empty-state">Belum ada transaksi bulan ini.</td></tr>';
+  };
 
-  }).getDashboardStats(currentUser);
+  if (_preloadedDashboard) {
+    renderStats(_preloadedDashboard);
+    _preloadedDashboard = null; // hanya dipakai sekali di render pertama
+  } else {
+    google.script.run.withSuccessHandler(renderStats).getDashboardStats(currentUser);
+  }
 }
 
 // ============================================================
